@@ -1159,6 +1159,28 @@ export function fromError(
   e: unknown,
   ctx: { providerID: ProviderID; aborted?: boolean },
 ): NonNullable<Assistant["error"]> {
+  function streamError(parsed: ProviderError.ParsedStreamError) {
+    if (parsed.type === "context_overflow") {
+      return new ContextOverflowError(
+        {
+          message: parsed.message,
+          responseBody: parsed.responseBody,
+        },
+        { cause: e },
+      ).toObject()
+    }
+    return new APIError(
+      {
+        message: parsed.message,
+        isRetryable: parsed.isRetryable,
+        responseBody: parsed.responseBody,
+      },
+      {
+        cause: e,
+      },
+    ).toObject()
+  }
+
   switch (true) {
     case e instanceof DOMException && e.name === "AbortError":
       return new AbortedError(
@@ -1231,34 +1253,16 @@ export function fromError(
         },
         { cause: e },
       ).toObject()
-    case e instanceof Error:
+    case e instanceof Error: {
+      const parsedStream = ProviderError.parseStreamError(e)
+      if (parsedStream) return streamError(parsedStream)
       return new NamedError.Unknown({ message: errorMessage(e) }, { cause: e }).toObject()
-    default:
-      try {
-        const parsed = ProviderError.parseStreamError(e)
-        if (parsed) {
-          if (parsed.type === "context_overflow") {
-            return new ContextOverflowError(
-              {
-                message: parsed.message,
-                responseBody: parsed.responseBody,
-              },
-              { cause: e },
-            ).toObject()
-          }
-          return new APIError(
-            {
-              message: parsed.message,
-              isRetryable: parsed.isRetryable,
-              responseBody: parsed.responseBody,
-            },
-            {
-              cause: e,
-            },
-          ).toObject()
-        }
-      } catch {}
+    }
+    default: {
+      const parsedStream = ProviderError.parseStreamError(e)
+      if (parsedStream) return streamError(parsedStream)
       return new NamedError.Unknown({ message: JSON.stringify(e) }, { cause: e }).toObject()
+    }
   }
 }
 

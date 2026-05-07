@@ -90,14 +90,21 @@ export function retryable(error: Err) {
   })
   if (!json || typeof json !== "object") return undefined
   const code = typeof json.code === "string" ? json.code : ""
+  const errorCode = typeof json.error?.code === "string" ? json.error.code : ""
+  const errorType = typeof json.error?.type === "string" ? json.error.type : ""
 
-  if (json.type === "error" && json.error?.type === "too_many_requests") {
+  if (json.type === "error" && errorType === "too_many_requests") {
     return "Too Many Requests"
   }
-  if (code.includes("exhausted") || code.includes("unavailable")) {
+  if (
+    code.includes("exhausted") ||
+    code.includes("unavailable") ||
+    errorCode === "server_is_overloaded" ||
+    errorType === "service_unavailable_error"
+  ) {
     return "Provider is overloaded"
   }
-  if (json.type === "error" && typeof json.error?.code === "string" && json.error.code.includes("rate_limit")) {
+  if (json.type === "error" && errorCode.includes("rate_limit")) {
     return "Rate Limited"
   }
   return undefined
