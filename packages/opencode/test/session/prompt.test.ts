@@ -163,7 +163,7 @@ const blockingProcessor = Layer.succeed(
   }),
 )
 
-function makeHttp(input?: { processor?: "blocking" }) {
+function makeHttp(input?: { processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service> }) {
   const deps = Layer.mergeAll(
     Session.defaultLayer,
     Snapshot.defaultLayer,
@@ -172,7 +172,7 @@ function makeHttp(input?: { processor?: "blocking" }) {
     AgentSvc.defaultLayer,
     Command.defaultLayer,
     Permission.defaultLayer,
-    Plugin.defaultLayer,
+    input?.plugin ?? Plugin.defaultLayer,
     Config.defaultLayer,
     ProviderSvc.defaultLayer,
     lsp,
@@ -234,6 +234,7 @@ function makeHttp(input?: { processor?: "blocking" }) {
 }
 
 const it = testEffect(makeHttp())
+const itNoAutoContinue = testEffect(makeHttp({ plugin: autocontinue(false) }))
 const race = testEffect(makeHttp({ processor: "blocking" }))
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 
@@ -375,7 +376,10 @@ const user = Effect.fn("test.user")(function* (sessionID: SessionID, text: strin
   return msg
 })
 
-const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { finish?: string }) {
+const seed = Effect.fn("test.seed")(function* (
+  sessionID: SessionID,
+  opts?: { finish?: string; tokens?: MessageV2.Assistant["tokens"] },
+) {
   const session = yield* Session.Service
   const msg = yield* user(sessionID, "hello")
   const assistant: MessageV2.Assistant = {
@@ -387,7 +391,7 @@ const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { fi
     agent: "build",
     cost: 0,
     path: { cwd: "/tmp", root: "/tmp" },
-    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    tokens: opts?.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     modelID: ref.modelID,
     providerID: ref.providerID,
     time: { created: Date.now() },
@@ -430,6 +434,30 @@ const addCompaction = (sessionID: SessionID, messageID: MessageID) =>
       auto: false,
     })
   })
+
+function compactionMarkers(messages: MessageV2.WithParts[]) {
+  return messages.filter(
+    (msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"),
+  )
+}
+
+function compactionAssistants(messages: MessageV2.WithParts[]) {
+  return messages.filter((msg) => msg.info.role === "assistant" && msg.info.agent === "compaction")
+}
+
+function autocontinue(enabled: boolean) {
+  return Layer.mock(Plugin.Service)({
+    trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+      if (name !== "experimental.compaction.autocontinue") return Effect.succeed(output)
+      return Effect.sync(() => {
+        ;(output as { enabled: boolean }).enabled = enabled
+        return output
+      })
+    },
+    list: () => Effect.succeed([]),
+    init: () => Effect.void,
+  })
+}
 
 const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
   const config = yield* Config.Service
@@ -558,6 +586,106 @@ it.instance(
         expect(summary.info.parentID).not.toBe(later.id)
       }
       expect(yield* llm.hits).toHaveLength(1)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "explicit summarize reuses an active compaction marker",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const compact = yield* SessionCompaction.Service
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Explicit summarize",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* user(chat.id, "needs summary")
+      yield* compact.create({ sessionID: chat.id, agent: "build", model: ref, auto: true })
+      const marker = compactionMarkers(yield* sessions.messages({ sessionID: chat.id })).at(0)
+      expect(marker).toBeTruthy()
+
+      yield* compact.create({ sessionID: chat.id, agent: "build", model: ref, auto: false })
+      expect(compactionMarkers(yield* sessions.messages({ sessionID: chat.id })).map((msg) => msg.info.id)).toEqual([
+        marker!.info.id,
+      ])
+
+      yield* llm.text("summary")
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      const summaries = compactionAssistants(messages)
+      expect(compactionMarkers(messages)).toHaveLength(1)
+      expect(summaries).toHaveLength(1)
+      expect(summaries[0].info.role).toBe("assistant")
+      if (summaries[0].info.role === "assistant") expect(summaries[0].info.parentID).toBe(marker!.info.id)
+    }),
+  { git: true },
+)
+
+itNoAutoContinue.instance(
+  "auto overflow creates one marker that prompt.loop processes once",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Overflow compact",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* seed(chat.id, {
+        finish: "end_turn",
+        tokens: { input: 100_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      })
+      const current = yield* user(chat.id, "continue after an oversized answer")
+      yield* llm.text("summary")
+
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      const markers = compactionMarkers(messages)
+      const summaries = compactionAssistants(messages)
+      expect(markers).toHaveLength(1)
+      expect(summaries).toHaveLength(1)
+      expect(summaries[0].info.role).toBe("assistant")
+      if (summaries[0].info.role === "assistant") {
+        expect(summaries[0].info.parentID).toBe(markers[0].info.id)
+        expect(summaries[0].info.parentID).not.toBe(current.id)
+      }
+    }),
+  { git: true },
+)
+
+itNoAutoContinue.instance(
+  "processor compact trigger creates one marker that prompt.loop processes once",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Processor compact",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const current = yield* user(chat.id, "trigger processor compact")
+      yield* llm.error(400, { type: "error", error: { code: "context_length_exceeded" } })
+      yield* llm.text("summary")
+
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      const markers = compactionMarkers(messages)
+      const summaries = compactionAssistants(messages)
+      expect(markers).toHaveLength(1)
+      expect(summaries).toHaveLength(1)
+      expect(summaries[0].info.role).toBe("assistant")
+      if (summaries[0].info.role === "assistant") {
+        expect(summaries[0].info.parentID).toBe(markers[0].info.id)
+        expect(summaries[0].info.parentID).not.toBe(current.id)
+      }
     }),
   { git: true },
 )
