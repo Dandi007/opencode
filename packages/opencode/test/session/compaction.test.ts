@@ -989,6 +989,39 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "does not create duplicate assistants for the same marker",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      yield* createUserMessage(session.id, "hello")
+      yield* SessionCompaction.use.create({ sessionID: session.id, agent: "build", model: ref, auto: false })
+      const msgs = yield* ssn.messages({ sessionID: session.id })
+      const marker = compactionMarkers(msgs).at(0)
+      expect(marker).toBeTruthy()
+
+      yield* SessionCompaction.use.process({
+        parentID: marker!.info.id,
+        messages: msgs,
+        sessionID: session.id,
+        auto: false,
+      })
+      yield* SessionCompaction.use.process({
+        parentID: marker!.info.id,
+        messages: msgs,
+        sessionID: session.id,
+        auto: false,
+      })
+
+      const summaries = (yield* ssn.messages({ sessionID: session.id })).filter(
+        (msg) => msg.info.role === "assistant" && msg.info.agent === "compaction",
+      )
+      expect(summaries).toHaveLength(1)
+      expect(summaries[0]?.info.role).toBe("assistant")
+      if (summaries[0]?.info.role === "assistant") expect(summaries[0].info.parentID).toBe(marker!.info.id)
+    }).pipe(withCompaction()),
+  )
+
+  itCompaction.instance(
     "marks summary message as errored on compact result",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service

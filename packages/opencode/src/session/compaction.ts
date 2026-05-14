@@ -373,6 +373,16 @@ export const layer = Layer.effect(
       if (!parent || parent.info.role !== "user") {
         throw new Error(`Compaction parent must be a user message: ${input.parentID}`)
       }
+      const existing = (yield* session.messages({ sessionID: input.sessionID })).find(
+        (msg) =>
+          msg.info.role === "assistant" &&
+          msg.info.agent === "compaction" &&
+          msg.info.summary &&
+          msg.info.parentID === input.parentID &&
+          !msg.info.error,
+      )
+      if (existing?.info.role === "assistant") return existing.info.finish ? "continue" : "stop"
+
       const userMessage = parent.info
       const compactionPart = parent.parts.find((part): part is MessageV2.CompactionPart => part.type === "compaction")
 
