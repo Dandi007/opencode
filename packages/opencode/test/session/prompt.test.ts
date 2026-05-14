@@ -419,6 +419,18 @@ const addSubtask = (sessionID: SessionID, messageID: MessageID, model = ref) =>
     })
   })
 
+const addCompaction = (sessionID: SessionID, messageID: MessageID) =>
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      messageID,
+      sessionID,
+      type: "compaction",
+      auto: false,
+    })
+  })
+
 const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
   const config = yield* Config.Service
   const prompt = yield* SessionPrompt.Service
@@ -515,6 +527,37 @@ it.instance(
           expect.objectContaining({ type: "synthetic", text: "note content" }),
         ]),
       )
+    }),
+  { git: true },
+)
+
+it.instance(
+  "processes an old compaction marker under its owner message",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Compaction owner",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const markerOwner = yield* user(chat.id, "needs compaction")
+      yield* addCompaction(chat.id, markerOwner.id)
+      const later = yield* user(chat.id, "later user message")
+      yield* llm.text("summary")
+
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const summary = (yield* sessions.messages({ sessionID: chat.id })).find(
+        (msg) => msg.info.role === "assistant" && msg.info.agent === "compaction",
+      )
+      expect(summary?.info.role).toBe("assistant")
+      if (summary?.info.role === "assistant") {
+        expect(summary.info.parentID).toBe(markerOwner.id)
+        expect(summary.info.parentID).not.toBe(later.id)
+      }
+      expect(yield* llm.hits).toHaveLength(1)
     }),
   { git: true },
 )

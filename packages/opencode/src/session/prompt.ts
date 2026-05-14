@@ -1690,18 +1690,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
           const task = tasks.pop()
 
-          if (task?.type === "subtask") {
-            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
+          if (task?.part.type === "subtask") {
+            yield* handleSubtask({ task: task.part, model, lastUser, sessionID, session, msgs })
             continue
           }
 
-          if (task?.type === "compaction") {
+          if (task?.part.type === "compaction") {
             const result = yield* compaction.process({
               messages: msgs,
-              parentID: lastUser.id,
+              parentID: task.part.messageID,
               sessionID,
-              auto: task.auto,
-              overflow: task.overflow,
+              auto: task.part.auto,
+              overflow: task.part.overflow,
             })
             if (result === "stop") break
             continue
