@@ -188,6 +188,12 @@ function createCompactionMarker(sessionID: SessionID) {
   )
 }
 
+function compactionMarkers(messages: MessageV2.WithParts[]) {
+  return messages.filter(
+    (msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"),
+  )
+}
+
 function fake(
   input: Parameters<SessionProcessorModule.SessionProcessor.Interface["create"]>[0],
   result: "continue" | "compact",
@@ -619,6 +625,115 @@ describe("session.compaction.create", () => {
           reason: "auto",
           summary: "",
         })
+      }),
+    ),
+  )
+
+  it.live(
+    "merges duplicate active compaction creates",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+
+        const sequential = yield* ssn.create({})
+        yield* compact.create({
+          sessionID: sequential.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+        })
+        yield* compact.create({
+          sessionID: sequential.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+        })
+
+        expect(compactionMarkers(yield* ssn.messages({ sessionID: sequential.id }))).toHaveLength(1)
+
+        const concurrent = yield* ssn.create({})
+        yield* Effect.all(
+          [
+            compact.create({
+              sessionID: concurrent.id,
+              agent: "build",
+              model: ref,
+              auto: true,
+            }),
+            compact.create({
+              sessionID: concurrent.id,
+              agent: "build",
+              model: ref,
+              auto: true,
+            }),
+          ],
+          { concurrency: "unbounded" },
+        )
+
+        expect(compactionMarkers(yield* ssn.messages({ sessionID: concurrent.id }))).toHaveLength(1)
+      }),
+    ),
+  )
+
+  it.live(
+    "allows a new marker after completed compaction",
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+
+        const info = yield* ssn.create({})
+        yield* compact.create({
+          sessionID: info.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+        })
+        const first = compactionMarkers(yield* ssn.messages({ sessionID: info.id })).at(0)
+        expect(first).toBeTruthy()
+
+        const summary: MessageV2.Assistant = {
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: info.id,
+          mode: "compaction",
+          agent: "compaction",
+          path: { cwd: dir, root: dir },
+          cost: 0,
+          tokens: {
+            output: 0,
+            input: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+          modelID: ref.modelID,
+          providerID: ref.providerID,
+          parentID: first!.info.id,
+          summary: true,
+          time: { created: Date.now() },
+          finish: "end_turn",
+        }
+        yield* ssn.updateMessage(summary)
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: summary.id,
+          sessionID: info.id,
+          type: "text",
+          text: "completed summary",
+        })
+
+        yield* compact.create({
+          sessionID: info.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+        })
+
+        const markers = compactionMarkers(yield* ssn.messages({ sessionID: info.id }))
+        expect(markers).toHaveLength(2)
+        expect(markers[0].info.id).toBe(first!.info.id)
+        expect(markers[1].info.id).not.toBe(first!.info.id)
       }),
     ),
   )

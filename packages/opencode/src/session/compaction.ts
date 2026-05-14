@@ -22,6 +22,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session-event"
+import { Database } from "@/storage/db"
+import { SyncEvent } from "@/sync"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -120,6 +122,23 @@ function completedCompactions(messages: MessageV2.WithParts[]) {
     if (userIndex === undefined) return []
     return [{ userIndex, assistantIndex, summary: summaryText(msg) }]
   })
+}
+
+function activeCompactionMarker(messages: MessageV2.WithParts[]) {
+  const completed = new Set<MessageID>()
+  for (const msg of messages) {
+    if (msg.info.role !== "assistant") continue
+    if (msg.info.agent !== "compaction") continue
+    if (!msg.info.summary || !msg.info.finish || msg.info.error) continue
+    completed.add(msg.info.parentID)
+  }
+
+  return messages.find(
+    (msg) =>
+      msg.info.role === "user" &&
+      msg.parts.some((part) => part.type === "compaction") &&
+      !completed.has(msg.info.id),
+  )
 }
 
 function buildPrompt(input: { previousSummary?: string; context: string[] }) {
@@ -590,23 +609,39 @@ export const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
-      const msg = yield* session.updateMessage({
-        id: MessageID.ascending(),
-        role: "user",
-        model: input.model,
-        sessionID: input.sessionID,
-        agent: input.agent,
-        time: { created: Date.now() },
-      })
-      yield* session.updatePart({
-        id: PartID.ascending(),
-        messageID: msg.id,
-        sessionID: msg.sessionID,
-        type: "compaction",
-        auto: input.auto,
-        overflow: input.overflow,
-      })
-      if (flags.experimentalEventSystem) {
+      const created = yield* Effect.sync(() =>
+        Database.transaction(
+          () => {
+            const messages = Array.from(MessageV2.stream(input.sessionID)).reverse()
+            if (activeCompactionMarker(messages)) return false
+
+            const msg: MessageV2.User = {
+              id: MessageID.ascending(),
+              role: "user",
+              model: input.model,
+              sessionID: input.sessionID,
+              agent: input.agent,
+              time: { created: Date.now() },
+            }
+            SyncEvent.run(MessageV2.Event.Updated, { sessionID: msg.sessionID, info: msg })
+            SyncEvent.run(MessageV2.Event.PartUpdated, {
+              sessionID: msg.sessionID,
+              time: Date.now(),
+              part: {
+                id: PartID.ascending(),
+                messageID: msg.id,
+                sessionID: msg.sessionID,
+                type: "compaction",
+                auto: input.auto,
+                overflow: input.overflow,
+              },
+            })
+            return true
+          },
+          { behavior: "immediate" },
+        ),
+      )
+      if (created && flags.experimentalEventSystem) {
         yield* events.publish(SessionEvent.Compaction.Started, {
           sessionID: input.sessionID,
           timestamp: DateTime.makeUnsafe(Date.now()),
