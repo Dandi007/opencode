@@ -129,7 +129,7 @@ function activeCompactionMarker(messages: MessageV2.WithParts[]) {
   for (const msg of messages) {
     if (msg.info.role !== "assistant") continue
     if (msg.info.agent !== "compaction") continue
-    if (!msg.info.summary || !msg.info.finish || msg.info.error) continue
+    if (!msg.info.summary || !msg.info.finish) continue
     completed.add(msg.info.parentID)
   }
 

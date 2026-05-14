@@ -737,6 +737,64 @@ describe("session.compaction.create", () => {
       }),
     ),
   )
+
+  it.live(
+    "allows new marker after errored compaction",
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+
+        const info = yield* ssn.create({})
+        yield* compact.create({
+          sessionID: info.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+        })
+        const first = compactionMarkers(yield* ssn.messages({ sessionID: info.id })).at(0)
+        expect(first).toBeTruthy()
+
+        const errored: MessageV2.Assistant = {
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: info.id,
+          mode: "compaction",
+          agent: "compaction",
+          path: { cwd: dir, root: dir },
+          cost: 0,
+          tokens: {
+            output: 0,
+            input: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+          modelID: ref.modelID,
+          providerID: ref.providerID,
+          parentID: first!.info.id,
+          summary: true,
+          time: { created: Date.now() },
+          finish: "error",
+          error: new MessageV2.ContextOverflowError({
+            message: "Session too large to compact",
+          }).toObject(),
+        }
+        yield* ssn.updateMessage(errored)
+
+        yield* compact.create({
+          sessionID: info.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+        })
+
+        const markers = compactionMarkers(yield* ssn.messages({ sessionID: info.id }))
+        expect(markers).toHaveLength(2)
+        expect(markers[0].info.id).toBe(first!.info.id)
+        expect(markers[1].info.id).not.toBe(first!.info.id)
+      }),
+    ),
+  )
 })
 
 describe("session.compaction.prune", () => {
