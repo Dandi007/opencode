@@ -11,7 +11,7 @@ const HOME_DIR = path.join(RUN_ROOT, "home")
 const DB_DIR = path.join(RUN_ROOT, "db")
 const DB_PATH = path.join(DB_DIR, "opencode.db")
 const PACKAGE_DIR = path.resolve(import.meta.dir, "../..")
-const BUN_BIN = path.join(os.homedir(), ".bun/bin/bun")
+const BUN_BIN = process.execPath
 
 type OpenCodeProcess = {
   process: Bun.Subprocess<"ignore", "pipe", "pipe">
