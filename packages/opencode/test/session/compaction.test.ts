@@ -782,6 +782,41 @@ describe("session.compaction.create", () => {
   )
 
   it.live(
+    "ignores stale markers older than the latest finished assistant",
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+
+        const info = yield* ssn.create({})
+        yield* compact.create({
+          sessionID: info.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+        })
+        const stale = compactionMarkers(yield* ssn.messages({ sessionID: info.id })).at(0)
+        expect(stale).toBeTruthy()
+
+        const laterUser = yield* createUserMessage(info.id, "later turn")
+        yield* createAssistantMessage(info.id, laterUser.id, dir)
+
+        yield* compact.create({
+          sessionID: info.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+        })
+
+        const markers = compactionMarkers(yield* ssn.messages({ sessionID: info.id }))
+        expect(markers).toHaveLength(2)
+        expect(markers[0].info.id).toBe(stale!.info.id)
+        expect(markers[1].info.id).not.toBe(stale!.info.id)
+      }),
+    ),
+  )
+
+  it.live(
     "allows new marker after errored compaction",
     provideTmpdirInstance((dir) =>
       Effect.gen(function* () {
@@ -1239,6 +1274,43 @@ describe("session.compaction.process", () => {
         expect(last.parts[0].text).toContain("Continue if you have next steps")
       }
     }),
+  )
+
+  itCompaction.instance(
+    "finishes marker bookkeeping for an existing completed summary",
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      yield* createUserMessage(session.id, "first")
+      const keep = yield* createUserMessage(session.id, "second")
+      yield* createSummaryCompaction(session.id)
+      let msgs = yield* ssn.messages({ sessionID: session.id })
+      const marker = compactionMarkers(msgs).at(0)
+      expect(marker).toBeTruthy()
+      yield* createSummaryAssistantMessage(session.id, marker!.info.id, test.directory, "finished summary")
+      msgs = yield* ssn.messages({ sessionID: session.id })
+
+      const result = yield* SessionCompaction.use.process({
+        parentID: marker!.info.id,
+        messages: msgs,
+        sessionID: session.id,
+        auto: true,
+      })
+
+      const all = yield* ssn.messages({ sessionID: session.id })
+      const updatedMarker = compactionMarkers(all).find((item) => item.info.id === marker!.info.id)
+      const part = updatedMarker?.parts.find((item): item is MessageV2.CompactionPart => item.type === "compaction")
+      const continues = all.filter(
+        (msg) =>
+          msg.info.role === "user" &&
+          msg.parts.some((item) => item.type === "text" && item.synthetic && item.metadata?.compaction_continue === true),
+      )
+
+      expect(result).toBe("continue")
+      expect(part?.tail_start_id).toBe(keep.id)
+      expect(continues).toHaveLength(1)
+    }).pipe(withCompaction({ config: cfg({ tail_turns: 1, preserve_recent_tokens: 10_000 }) })),
   )
 
   itCompaction.instance(
