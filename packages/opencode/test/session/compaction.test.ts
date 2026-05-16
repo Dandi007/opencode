@@ -194,6 +194,10 @@ function compactionMarkers(messages: MessageV2.WithParts[]) {
   )
 }
 
+function compactionAssistants(messages: MessageV2.WithParts[]) {
+  return messages.filter((msg) => msg.info.role === "assistant" && msg.info.agent === "compaction")
+}
+
 function fake(
   input: Parameters<SessionProcessorModule.SessionProcessor.Interface["create"]>[0],
   result: "continue" | "compact",
@@ -630,6 +634,45 @@ describe("session.compaction.create", () => {
   )
 
   it.live(
+    "publishes message and part events for the created marker",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+        const bus = yield* Bus.Service
+        const info = yield* ssn.create({})
+        const messageSeen = yield* Deferred.make<void>()
+        const partSeen = yield* Deferred.make<void>()
+
+        const unsubMessage = yield* bus.subscribeCallback(MessageV2.Event.Updated, (event) => {
+          if (event.properties.info.sessionID !== info.id) return
+          if (event.properties.info.role !== "user") return
+          Deferred.doneUnsafe(messageSeen, Effect.void)
+        })
+        yield* Effect.addFinalizer(() => Effect.sync(unsubMessage))
+
+        const unsubPart = yield* bus.subscribeCallback(MessageV2.Event.PartUpdated, (event) => {
+          if (event.properties.part.sessionID !== info.id) return
+          if (event.properties.part.type !== "compaction") return
+          Deferred.doneUnsafe(partSeen, Effect.void)
+        })
+        yield* Effect.addFinalizer(() => Effect.sync(unsubPart))
+
+        yield* compact.create({
+          sessionID: info.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+          overflow: true,
+        })
+
+        yield* Deferred.await(messageSeen).pipe(Effect.timeout("500 millis"))
+        yield* Deferred.await(partSeen).pipe(Effect.timeout("500 millis"))
+      }),
+    ),
+  )
+
+  it.live(
     "merges duplicate active compaction creates",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
@@ -1047,7 +1090,7 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
-    "does not create duplicate assistants for the same marker",
+    "does not create duplicate assistants for a completed marker",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
@@ -1063,6 +1106,12 @@ describe("session.compaction.process", () => {
         sessionID: session.id,
         auto: false,
       })
+      const firstSummary = (yield* ssn.messages({ sessionID: session.id })).find(
+        (msg) => msg.info.role === "assistant" && msg.info.agent === "compaction",
+      )
+      expect(firstSummary?.info.role).toBe("assistant")
+      if (firstSummary?.info.role !== "assistant") return
+      yield* ssn.updateMessage({ ...firstSummary.info, finish: "end_turn" })
       yield* SessionCompaction.use.process({
         parentID: marker!.info.id,
         messages: msgs,
@@ -1076,6 +1125,60 @@ describe("session.compaction.process", () => {
       expect(summaries).toHaveLength(1)
       expect(summaries[0]?.info.role).toBe("assistant")
       if (summaries[0]?.info.role === "assistant") expect(summaries[0].info.parentID).toBe(marker!.info.id)
+    }).pipe(withCompaction()),
+  )
+
+  itCompaction.instance(
+    "retries unfinished compaction assistant for the same marker",
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      yield* createUserMessage(session.id, "hello")
+      yield* SessionCompaction.use.create({ sessionID: session.id, agent: "build", model: ref, auto: false })
+      const msgs = yield* ssn.messages({ sessionID: session.id })
+      const marker = compactionMarkers(msgs).at(0)
+      expect(marker).toBeTruthy()
+
+      const stale: MessageV2.Assistant = {
+        id: MessageID.ascending(),
+        role: "assistant",
+        sessionID: session.id,
+        mode: "compaction",
+        agent: "compaction",
+        path: { cwd: test.directory, root: test.directory },
+        cost: 0,
+        tokens: {
+          output: 0,
+          input: 0,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        parentID: marker!.info.id,
+        summary: true,
+        time: { created: Date.now() },
+      }
+      yield* ssn.updateMessage(stale)
+
+      const result = yield* SessionCompaction.use.process({
+        parentID: marker!.info.id,
+        messages: msgs,
+        sessionID: session.id,
+        auto: false,
+      })
+
+      const summaries = compactionAssistants(yield* ssn.messages({ sessionID: session.id }))
+      expect(result).toBe("continue")
+      expect(summaries).toHaveLength(2)
+      expect(summaries[0]?.info.role).toBe("assistant")
+      if (summaries[0]?.info.role === "assistant") {
+        expect(summaries[0].info.error?.name).toBe("MessageAbortedError")
+        expect(summaries[0].info.finish).toBe("error")
+      }
+      expect(summaries[1]?.info.role).toBe("assistant")
+      if (summaries[1]?.info.role === "assistant") expect(summaries[1].info.parentID).toBe(marker!.info.id)
     }).pipe(withCompaction()),
   )
 

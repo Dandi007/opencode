@@ -381,12 +381,31 @@ export const layer = Layer.effect(
           msg.info.parentID === input.parentID &&
           !msg.info.error,
       )
-      if (existing?.info.role === "assistant") return existing.info.finish ? "continue" : "stop"
+      let inputMessages = input.messages
+      if (existing?.info.role === "assistant") {
+        if (existing.info.finish) return "continue"
+        const interrupted: MessageV2.Assistant = {
+          ...existing.info,
+          finish: "error",
+          error: MessageV2.fromError(new DOMException("Compaction interrupted before completion", "AbortError"), {
+            providerID: existing.info.providerID,
+            aborted: true,
+          }),
+          time: {
+            ...existing.info.time,
+            completed: existing.info.time.completed ?? Date.now(),
+          },
+        }
+        yield* session.updateMessage(interrupted)
+        inputMessages = input.messages.map((msg) =>
+          msg.info.id === interrupted.id ? { ...msg, info: interrupted } : msg,
+        )
+      }
 
       const userMessage = parent.info
       const compactionPart = parent.parts.find((part): part is MessageV2.CompactionPart => part.type === "compaction")
 
-      let messages = input.messages
+      let messages = inputMessages
       let replay:
         | {
             info: MessageV2.User
@@ -394,12 +413,12 @@ export const layer = Layer.effect(
           }
         | undefined
       if (input.overflow) {
-        const idx = input.messages.findIndex((m) => m.info.id === input.parentID)
+        const idx = inputMessages.findIndex((m) => m.info.id === input.parentID)
         for (let i = idx - 1; i >= 0; i--) {
-          const msg = input.messages[i]
+          const msg = inputMessages[i]
           if (msg.info.role === "user" && !msg.parts.some((p) => p.type === "compaction")) {
             replay = { info: msg.info, parts: msg.parts }
-            messages = input.messages.slice(0, i)
+            messages = inputMessages.slice(0, i)
             break
           }
         }
@@ -407,7 +426,7 @@ export const layer = Layer.effect(
           replay && messages.some((m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"))
         if (!hasContent) {
           replay = undefined
-          messages = input.messages
+          messages = inputMessages
         }
       }
 
@@ -654,6 +673,8 @@ export const layer = Layer.effect(
         ),
       )
       if (!created) return
+      yield* session.updateMessage(created.msg)
+      yield* session.updatePart(created.part)
       if (flags.experimentalEventSystem) {
         yield* events.publish(SessionEvent.Compaction.Started, {
           sessionID: input.sessionID,
