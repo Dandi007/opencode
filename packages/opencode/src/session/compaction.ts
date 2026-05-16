@@ -23,7 +23,7 @@ import { EventV2 } from "@opencode-ai/core/event"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session-event"
 import { Database } from "@/storage/db"
-import { SyncEvent } from "@/sync"
+import { MessageTable, PartTable } from "./session.sql"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -373,7 +373,7 @@ export const layer = Layer.effect(
       if (!parent || parent.info.role !== "user") {
         throw new Error(`Compaction parent must be a user message: ${input.parentID}`)
       }
-      const existing = (yield* session.messages({ sessionID: input.sessionID })).find(
+      const existing = Array.from(MessageV2.stream(input.sessionID)).find(
         (msg) =>
           msg.info.role === "assistant" &&
           msg.info.agent === "compaction" &&
@@ -621,37 +621,40 @@ export const layer = Layer.effect(
     }) {
       const created = yield* Effect.sync(() =>
         Database.transaction(
-          () => {
+          (tx) => {
             const messages = Array.from(MessageV2.stream(input.sessionID)).reverse()
-            if (activeCompactionMarker(messages)) return false
+            if (activeCompactionMarker(messages)) return undefined
 
+            const now = Date.now()
             const msg: MessageV2.User = {
               id: MessageID.ascending(),
               role: "user",
               model: input.model,
               sessionID: input.sessionID,
               agent: input.agent,
-              time: { created: Date.now() },
+              time: { created: now },
             }
-            SyncEvent.run(MessageV2.Event.Updated, { sessionID: msg.sessionID, info: msg })
-            SyncEvent.run(MessageV2.Event.PartUpdated, {
+            const part: MessageV2.CompactionPart = {
+              id: PartID.ascending(),
+              messageID: msg.id,
               sessionID: msg.sessionID,
-              time: Date.now(),
-              part: {
-                id: PartID.ascending(),
-                messageID: msg.id,
-                sessionID: msg.sessionID,
-                type: "compaction",
-                auto: input.auto,
-                overflow: input.overflow,
-              },
-            })
-            return true
+              type: "compaction",
+              auto: input.auto,
+              overflow: input.overflow,
+            }
+            const { id, sessionID, ...info } = msg
+            const { id: partID, messageID, sessionID: partSessionID, ...partData } = part
+            tx.insert(MessageTable).values({ id, session_id: sessionID, time_created: now, data: info }).run()
+            tx.insert(PartTable)
+              .values({ id: partID, message_id: messageID, session_id: partSessionID, time_created: now, data: partData })
+              .run()
+            return { msg, part, time: now }
           },
           { behavior: "immediate" },
         ),
       )
-      if (created && flags.experimentalEventSystem) {
+      if (!created) return
+      if (flags.experimentalEventSystem) {
         yield* events.publish(SessionEvent.Compaction.Started, {
           sessionID: input.sessionID,
           timestamp: DateTime.makeUnsafe(Date.now()),

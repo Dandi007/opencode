@@ -106,7 +106,7 @@ function responsesResponse(text: string) {
 }
 
 class MockLLMServer {
-  readonly server: Bun.Server
+  readonly server: Bun.Server<undefined>
   readonly requests: Array<{ url: string; body: unknown; compaction: boolean }> = []
 
   constructor() {
