@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@opencode-ai/sdk",
-  "version": "1.15.1",
+  "version": "1.15.1-qinglin-dev.826945163a1d",
   "type": "module",
   "license": "MIT",
   "scripts": {

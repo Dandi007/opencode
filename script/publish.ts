@@ -17,6 +17,7 @@ const pkgjsons = await Array.fromAsync(
 ).then((arr) => arr.filter((x) => !x.includes("node_modules") && !x.includes("dist")))
 
 async function prepareReleaseFiles() {
+  // Script.version is the single release stamp; personal fork builds use the qinglin-dev prerelease label here too.
   for (const file of pkgjsons) {
     let pkg = await Bun.file(file).text()
     pkg = pkg.replaceAll(/"version": "[^"]+"/g, `"version": "${Script.version}"`)
