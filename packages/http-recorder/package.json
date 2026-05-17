@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "version": "1.15.1",
+  "version": "1.15.1-qinglin-dev.826945163a1d",
   "name": "@opencode-ai/http-recorder",
   "type": "module",
   "license": "MIT",

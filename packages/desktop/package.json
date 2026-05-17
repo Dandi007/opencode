@@ -1,7 +1,7 @@
 {
   "name": "@opencode-ai/desktop",
   "private": true,
-  "version": "1.15.1",
+  "version": "1.15.1-qinglin-dev.826945163a1d",
   "type": "module",
   "license": "MIT",
   "homepage": "https://opencode.ai",
